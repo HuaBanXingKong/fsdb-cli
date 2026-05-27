@@ -27,7 +27,7 @@ import argparse
 import os
 import subprocess
 import sys
-import tempfile
+import time
 
 #////////////////////////////////////////////////////////////////////////////
 #***************************** Module Variables ****************************#
@@ -92,9 +92,10 @@ class FsdbCli:
   #*************************** Class Functions *******************************#
   #///////////////////////////////////////////////////////////////////////////#
   # ---------------------------------------------------------------------------
-  def __init__(self, fsdb_path, log_dir=None):
+  def __init__(self, fsdb_path, log_dir=None, work_dir=None):
     self.fsdb_path = os.path.abspath(fsdb_path)
     self.log_dir = log_dir
+    self.work_dir = work_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "memory")
 
   # ---------------------------------------------------------------------------
   @staticmethod
@@ -221,27 +222,23 @@ class FsdbCli:
     _eprint(f"(no signals matching '{scope_path}')")
 
   def _scope_try(self, scope_path, level):
+    os.makedirs(self.work_dir, exist_ok=True)
+    out_path = os.path.join(self.work_dir, f"scope_{time.strftime('%Y%m%d_%H%M%S')}.csv")
     cmd = ["fsdbreport", self.fsdb_path, "-nolog"]
     cmd.extend(["-s", scope_path, "-bt", "0ns", "-et", "0ns", "-csv"])
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv")
-    os.close(tmp_fd)
-    try:
-      cmd.extend(["-o", tmp_path])
-      subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-      if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-        return False
-      with open(tmp_path, "r") as f:
-        header = f.readline().strip()
-      if header.startswith("Time"):
-        sigs = header.split(",")[1:]
-        for sig in sigs:
-          sys.stdout.write(sig + "\n")
-        sys.stdout.flush()
-        return len(sigs) > 0
+    cmd.extend(["-o", out_path])
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
       return False
-    finally:
-      if os.path.exists(tmp_path):
-        os.unlink(tmp_path)
+    with open(out_path, "r") as f:
+      header = f.readline().strip()
+    if header.startswith("Time"):
+      sigs = header.split(",")[1:]
+      for sig in sigs:
+        sys.stdout.write(sig + "\n")
+      sys.stdout.flush()
+      return len(sigs) > 0
+    return False
 
   # ---------------------------------------------------------------------------
   def __repr__(self):
