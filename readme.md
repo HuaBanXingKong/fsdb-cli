@@ -1,39 +1,55 @@
-# fsdb-cli 状态
+# fsdb-cli
 
-## 当前进度
+FSDB 波形查询 CLI + AI 分析 skill。
 
-已实现 7 个 CLI 命令，覆盖 fsdbreport 主要功能：
+## 架构
 
-| 命令 | 状态 | 说明 |
-|------|------|------|
-| `value` | 完成 | 单时间点多信号取值，委托 `range` 令 bt==et |
-| `range` | 完成 | 时间范围查询，支持 `--fmt` `--csv` |
-| `export` | 完成 | 条件表达式触发导出 |
-| `strobe` | 完成 | 边沿采样导出 |
-| `forces` | 完成 | force/release/deposit 事件查找 |
-| `info` | 完成 | FSDB 元数据，优先用 `fsdbdebug -info`，降级为文件信息 |
-| `scope` | 完成 | 层级信号发现，用 fsdbreport CSV 头行解析，零 C++ |
+```
+fsdb_cli.sh (入口) → fsdb_cli.py (核心)
+                        ├── info    → NPI → fsdbdebug
+                        ├── scope   → fsdbreport (CSV header parse)
+                        ├── value   → fsdbreport
+                        ├── range   → fsdbreport
+                        ├── export  → fsdbreport
+                        ├── strobe  → fsdbreport
+                        └── forces  → fsdbreport
+```
 
-架构：Shell（路径检测）→ Python（FsdbCli 类 → fsdbreport 命令行）。纯 Python 标准库，不依赖 NPI。
+- Shell: 项目根目录定位、环境变量初始化
+- Python: argparse 参数解析、fsdbreport 命令行构建、subprocess 执行
+- 纯 Python 标准库，无额外依赖
 
-## NPI/Python API 集成
+## 文件说明
 
-- **目标**：引入 pynpi 作为可选后端，实现毫秒级查询 + Python 原生数据结构
-- **依赖**：`VERDI_HOME/share/NPI/python/pynpi`
-- **当前状态**：`check_npi.py` 检测脚本已就绪，用户 @HuaBanXingKong 正在 RockyLinux810 服务器上验证。Verdi 版本 `O-2018.09-SP2`，NPI/python 目录存在，`PYTHONPATH` 待配置后重试
+| 文件 | 说明 |
+|------|------|
+| `SKILL.md` | Skill 使用说明（供 AI 读取） |
+| `readme.md` | 本文件（供人类阅读） |
+| `scripts/fsdb_cli.sh` | Shell 入口 |
+| `scripts/fsdb_cli.py` | Python 核心（FsdbCli 类 + argparse） |
+| `scripts/check_npi.py` | NPI 环境检测脚本 |
 
-## 参照仓库
+## NPI 状态
 
-分析过以下 GitHub 仓库，已提取可用思路：
+Verdi_O-2018.09-SP2 的 pynpi Python API 仅可靠支持以下操作：
 
-| 仓库 | 特点 | 借鉴项 |
-|------|------|--------|
-| nayiri-k/fsdb-parse | C++ FsdbReader + `fsdbdebug` | `info` 命令的数据源 |
-| avidan-efody/wave_rerunner | pynpi `sig_hdl_value_between` | NPI 后端参考 |
-| ekiwi/wellen | FST/VCD only（不含 FSDB） | 无关 |
+| API | 状态 | 说明 |
+|-----|------|------|
+| `wave.init` / `wave.open` | OK | 初始化与打开 FSDB |
+| `wave.min_time` / `wave.max_time` | OK | 返回 `[unit, value]` |
+| `wave.scope_by_name` | OK | `scope_by_name(fsdb, name, None)` |
+| `wave.iter_child_scope` | OK | `iter_child_scope(scope)` |
+| `wave.iter_sig` | OK | `iter_sig(scope)` — 返回句柄但属性不可读 |
+| `wave.sig_property_str` | **不可用** | 所有属性返回 None |
+| `wave.sig_property` | **不可用** | 返回 `[0, garbage]` |
+| `wave.sig_by_name` | **不可用** | 始终返回 None |
 
-## 不做的
+结论：2018 版 NPI 不可用于信号查询，信号操作统一走 fsdbreport。
 
-- 不做 C++ 编译——维护成本大于收益，fsdbreport 已覆盖核心查询
-- 不做 daemon 进程——xwave 的路子，本 skill 定位是轻量包装，不是平台
-- 不做协议级解析（APB/AXI）——这是 AI 分析层的事，不放在 CLI 里
+## 开发笔记
+
+- 2018 fsdbreport CSV 头格式 `Time(1ps),...`（非 `Time,`）
+- `-level` 参数在 2018 版不支持
+- scope 命令 prefix `/tb_top/` 补偿 FSDB 层级
+- `subprocess.run(cmd)` 不能用 `stdout=PIPE`，否则 fsdbreport 跳过 CSV 写入
+- Python 3.6 兼容：`universal_newlines` 替代 `text`，手动 `stdout/stderr=PIPE` 替代 `capture_output`

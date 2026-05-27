@@ -36,6 +36,26 @@ import tempfile
 _ENV_FSDB = "FSDB_CLI_DEFAULT_FSDB"
 _ENV_LOG_DIR = "FSDB_CLI_DEFAULT_LOG_DIR"
 
+# NPI 输出到 stderr（NPI 库会重定向 stdout）
+def _eprint(*a, **kw):
+    kw.setdefault("file", sys.stderr)
+    print(*a, **kw)
+
+def _init_npi():
+    """初始化 2018 NPI API，失败返回 None"""
+    try:
+        verdi = os.environ.get("VERDI_HOME", "")
+        if not verdi:
+            return None
+        npi_py = os.path.join(verdi, "share", "NPI", "python")
+        if npi_py not in sys.path:
+            sys.path.insert(0, npi_py)
+        import pynpi.wave as wave
+        wave.init("test")
+        return wave
+    except Exception:
+        return None
+
 #////////////////////////////////////////////////////////////////////////////
 #***************************** Module Functions ****************************#
 #////////////////////////////////////////////////////////////////////////////
@@ -52,6 +72,19 @@ def _resolve_log_dir(cli_log_dir=None):
   if cli_log_dir:
     return cli_log_dir
   return os.environ.get(_ENV_LOG_DIR, "")
+
+def _parse_time(s):
+    """解析时间字符串为整数，支持 ns/us/ms/s 后缀，默认 ns"""
+    if isinstance(s, (int, float)):
+        return int(s)
+    s = str(s).strip()
+    if not s:
+        return None
+    multipliers = {"ns": 1, "us": 1000, "ms": 1000000, "s": 1000000000}
+    for unit, mul in multipliers.items():
+        if s.endswith(unit):
+            return int(float(s[:-len(unit)]) * mul)
+    return int(float(s))
 
 class FsdbCli:
   """FSDB 波形查询 CLI，封装 fsdbreport 命令"""
@@ -93,7 +126,7 @@ class FsdbCli:
 
   # ---------------------------------------------------------------------------
   def range(self, signals, bt, et, fmt="h", csv=False, output=None, enable_log=False):
-    """查询信号在时间范围内的值变化"""
+    """查询信号在时间范围内的值变化（fsdbreport）"""
     cmd = self._make_cmd(enable_log)
     cmd.extend(self._signal_args(signals))
     cmd.extend(["-bt", bt, "-et", et, "-of", fmt])
@@ -102,13 +135,10 @@ class FsdbCli:
     if output:
       cmd.extend(["-o", output])
     self._run(cmd, enable_log)
-
-  # ---------------------------------------------------------------------------
   def value(self, signals, time, fmt="h", output=None, enable_log=False):
-    """查询单个时间点的信号值"""
+    """查询单个时间点的信号值（fsdbreport）"""
     self.range(signals, time, time, fmt=fmt, csv=False, output=output, enable_log=enable_log)
 
-  # ---------------------------------------------------------------------------
   def export_expr(self, signals, expr, bt, et, fmt="h", csv=False, output=None, enable_log=False):
     """条件表达式为真时导出信号值"""
     cmd = self._make_cmd(enable_log)
@@ -152,51 +182,67 @@ class FsdbCli:
 
   # ---------------------------------------------------------------------------
   def info(self):
-    """查询 FSDB 元数据（时间范围、timescale、版本等）"""
-    info_data = {"fsdb": self.fsdb_path}
+    """查询 FSDB 元数据（优先 NPI）"""
+    wave = _init_npi()
+    if wave:
+      try:
+        fsdb = wave.open(self.fsdb_path)
+        if fsdb:
+          mt = wave.min_time(fsdb)
+          xt = wave.max_time(fsdb)
+          _eprint(f"fsdb: {self.fsdb_path}")
+          _eprint(f"min_time: {mt[1]} (unit={mt[0]})")
+          _eprint(f"max_time: {xt[1]} (unit={xt[0]})")
+          _eprint(f"file_size: {round(os.stat(self.fsdb_path).st_size / 1048576, 1)} MB")
+          sigs = []
+          top = _npi_get_root(wave, fsdb)
+          if top:
+            _npi_walk_scopes(wave, fsdb, top, lambda s, sc: sigs.append(s))
+          _eprint(f"sigs: {len(sigs)}")
+          return
+      except Exception as e:
+        _eprint(f"(NPI skipped: {e})")
+    # 降级
     st = os.stat(self.fsdb_path)
-    info_data["file_size_mb"] = round(st.st_size / (1024 * 1024), 1)
-    try:
-      result = subprocess.run(["fsdbdebug", "-info", self.fsdb_path],
-                              capture_output=True, text=True, timeout=5)
-      if result.returncode == 0 and result.stderr:
-        for line in result.stderr.split("\n"):
-          if ":" in line:
-            k, v = line.split(":", 1)
-            info_data[k.strip()] = v.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-      pass
-    for k, v in info_data.items():
-      print(f"{k}: {v}")
+    print(f"fsdb: {self.fsdb_path}")
+    print(f"file_size_mb: {round(st.st_size / 1048576, 1)}")
 
   # ---------------------------------------------------------------------------
   def scope(self, scope_path, level=1):
-    """列出指定层级下的信号路径"""
+    """列出指定层级下的信号路径（fsdbreport）"""
+    if not scope_path.startswith("/"):
+      scope_path = "/" + scope_path
     if not scope_path.endswith("*"):
       scope_path = scope_path.rstrip("/") + "/*"
+    if not scope_path.startswith("/tb_top/"):
+      scope_path = "/tb_top" + scope_path
+    if self._scope_try(scope_path, level):
+      return
+    _eprint(f"(no signals matching '{scope_path}')")
+
+  def _scope_try(self, scope_path, level):
     cmd = ["fsdbreport", self.fsdb_path, "-nolog"]
     cmd.extend(["-s", scope_path, "-bt", "0ns", "-et", "0ns", "-csv"])
-    if level is not None:
-      cmd.extend(["-level", str(level)])
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv")
     os.close(tmp_fd)
     try:
       cmd.extend(["-o", tmp_path])
-      result = subprocess.run(cmd, capture_output=True)
-      if result.returncode != 0:
-        sys.exit(result.returncode)
+      subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+        return False
       with open(tmp_path, "r") as f:
         header = f.readline().strip()
-      if header.startswith("Time,"):
-        for sig in header.split(",")[1:]:
-          print(sig)
+      if header.startswith("Time"):
+        sigs = header.split(",")[1:]
+        for sig in sigs:
+          sys.stdout.write(sig + "\n")
+        sys.stdout.flush()
+        return len(sigs) > 0
+      return False
     finally:
       if os.path.exists(tmp_path):
         os.unlink(tmp_path)
 
-  #///////////////////////////////////////////////////////////////////////////#
-  #******************************* Debugging *********************************#
-  #///////////////////////////////////////////////////////////////////////////#
   # ---------------------------------------------------------------------------
   def __repr__(self):
     return f"FsdbCli(fsdb='{self.fsdb_path}')"
@@ -239,7 +285,7 @@ if __name__ == "__main__":
   common.add_argument("-o", "--output", default=None, help="Output report file")
 
   parser = argparse.ArgumentParser(description="FSDB waveform query CLI (fsdbreport wrapper)")
-  subparsers = parser.add_subparsers(dest="command", required=True)
+  subparsers = parser.add_subparsers(dest="command")
 
   # value ----------------------------------------------------------------
   value_p = subparsers.add_parser("value", parents=[common],
@@ -307,4 +353,8 @@ if __name__ == "__main__":
   scope_p.add_argument("--level", type=int, default=1,
     help="Hierarchy depth (default: 1, 0=all levels)")
 
-  FsdbCli.run_from_args(parser.parse_args())
+  args = parser.parse_args()
+  if args.command is None:
+    parser.print_help()
+    sys.exit(1)
+  FsdbCli.run_from_args(args)
