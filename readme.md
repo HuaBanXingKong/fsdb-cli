@@ -19,6 +19,22 @@ fsdb_cli.sh (入口) → fsdb_cli.py (核心)
 - Python: argparse 参数解析、fsdbreport 命令行构建、subprocess 执行
 - 纯 Python 标准库，无额外依赖
 
+## 环境要求
+
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| VCS/Verdi | O-2018.09-SP2 | fsdbreport、pynpi |
+| Python | 3.6+ | subprocess、argparse |
+| OS | CentOS 7.9 / Rocky Linux 8.10 | 已验证 |
+
+环境变量（使用前需 source 或写入 `.bashrc`）：
+```bash
+export VERDI_HOME=/opt/synopsys/verdi/Verdi_O-2018.09-SP2
+export PATH=$VERDI_HOME/bin:$PATH                         # fsdbreport
+export LD_LIBRARY_PATH=$VERDI_HOME/share/NPI/lib/LINUX64:$LD_LIBRARY_PATH  # NPI
+export PYTHONPATH=$VERDI_HOME/share/NPI/python:$PYTHONPATH                # pynpi
+```
+
 ## 文件说明
 
 | 文件 | 说明 |
